@@ -1,0 +1,21 @@
+# Unreal Engine generated files
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# IDE and local user files
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Local backups and generated upgrade reports
+Backup/
+UpgradeLog.htm
+
+# Operating-system files
+Thumbs.db
+Desktop.ini
