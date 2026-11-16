@@ -29,6 +29,8 @@ AGeoTIFFReaderActor::AGeoTIFFReaderActor()
         Warning,
         TEXT("[GeoTIFF TEST] Constructor called")
     );
+
+    WaterMaterial = nullptr;
 }
 
 
@@ -36,164 +38,123 @@ void AGeoTIFFReaderActor::BeginPlay()
 {
     Super::BeginPlay();
 
-    UE_LOG(LogTemp, Warning, TEXT("[GeoTIFF TEST] BeginPlay called"));
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("========== Flood Animation Started ==========")
+    );
 
-    // 1. 載入 PINN 水深
-    LoadGeoTIFF();
+    // 1. DEM 只載入一次
+    if (!LoadTerrainGeoTIFF())
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[Flood Animation] Failed to load DEM.")
+        );
 
-    // 2. 載入 DEM
-    LoadTerrainGeoTIFF();
+        return;
+    }
 
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("[GeoTIFF TEST] Water Loaded: %s"),
-        bRasterLoaded ? TEXT("YES") : TEXT("NO")
+        TEXT("[Flood Animation] DEM loaded successfully.")
     );
 
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("[GeoTIFF TEST] DEM Loaded: %s"),
-        bTerrainLoaded ? TEXT("YES") : TEXT("NO")
-    );
-
-    if (!bRasterLoaded || !bTerrainLoaded)
+    // 2. 檢查影格數量
+    if (TotalFrameCount <= 0)
     {
         UE_LOG(
             LogTemp,
             Error,
-            TEXT("[GeoTIFF TEST] Raster loading failed.")
+            TEXT("[Flood Animation] Invalid TotalFrameCount.")
         );
 
         return;
     }
 
-    // 3. 測試中心像素
-    const int32 TestCol = 370;
-    const int32 TestRow = 239;
+    // 3. 從第 0 幀開始
+    CurrentFrameIndex = 0;
 
-    // 4. 計算水深像素中心的地理座標
-    const double WorldX =
-        GeoTransform[0] +
-        (TestCol + 0.5) * GeoTransform[1] +
-        (TestRow + 0.5) * GeoTransform[2];
+    LoadAndGenerateFrame(CurrentFrameIndex);
 
-    const double WorldY =
-        GeoTransform[3] +
-        (TestCol + 0.5) * GeoTransform[4] +
-        (TestRow + 0.5) * GeoTransform[5];
-
-    // 5. 取得 DEM 高程
-    float TerrainElevation = 0.0f;
-
-    if (SampleTerrainBilinear(
-        WorldX,
-        WorldY,
-        TerrainElevation))
-    {
-        const int32 WaterIndex =
-    TestRow * RasterWidth + TestCol;
-
-    if (!RasterData.IsValidIndex(WaterIndex))
+    // 4. 不自動播放時，只顯示第 0 幀
+    if (!bAutoPlay)
     {
         UE_LOG(
             LogTemp,
-            Error,
-            TEXT("[Test] Invalid water raster index.")
+            Warning,
+            TEXT("[Flood Animation] AutoPlay disabled.")
         );
 
         return;
     }
 
-    const float WaterDepth = RasterData[WaterIndex];
-
-    if (!std::isfinite(WaterDepth))
+    // 5. 檢查播放間隔
+    if (FrameIntervalSeconds <= 0.0f)
     {
         UE_LOG(
             LogTemp,
-            Warning,
-            TEXT("[Test] Water pixel is NoData.")
+            Error,
+            TEXT("[Flood Animation] Invalid FrameIntervalSeconds.")
         );
 
         return;
     }
 
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("========== Terrain Sampling Test ==========")
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[Test] Pixel: Col=%d Row=%d"),
-            TestCol,
-            TestRow
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[Test] World: X=%.3f Y=%.3f"),
-            WorldX,
-            WorldY
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[Test] Terrain Elevation: %.3f m"),
-            TerrainElevation
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[Test] Water Depth: %.6f m"),
-            WaterDepth
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[Test] Water Surface: %.3f m"),
-            TerrainElevation + WaterDepth
-        );
-
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("========== Sampling Test Completed ==========")
-        );
-
-        // 建立局部水面測試網格
-        GenerateWaterMesh(
-            350,  // 起始 Col
-            219,  // 起始 Row
-            40,   // 寬度：40 pixels
-            40    // 高度：40 pixels
-        );
-
-        GenerateWaterMeshTest();
-    }
-    else
+    // 6. 啟動動畫 Timer
+    if (TotalFrameCount > 1)
     {
+        GetWorldTimerManager().SetTimer(
+            AnimationTimerHandle,
+            this,
+            &AGeoTIFFReaderActor::AdvanceToNextFrame,
+            FrameIntervalSeconds,
+            true
+        );
+
         UE_LOG(
             LogTemp,
-            Error,
-            TEXT("[Test] DEM bilinear sampling failed.")
+            Warning,
+            TEXT("[Flood Animation] Timer started. Interval=%.2f seconds."),
+            FrameIntervalSeconds
         );
     }
 }
 
+// Actor 結束時清除動畫 Timer
+void AGeoTIFFReaderActor::EndPlay(
+    const EEndPlayReason::Type EndPlayReason)
+{
+    // 停止動畫播放
+    GetWorldTimerManager().ClearTimer(AnimationTimerHandle);
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Timer cleared. Actor EndPlay.")
+    );
+
+    Super::EndPlay(EndPlayReason);
+}
 
 void AGeoTIFFReaderActor::LoadGeoTIFF()
 {
+    // 重設上一個影格的 Raster 狀態
     bRasterLoaded = false;
+
     RasterData.Reset();
+
+    RasterWidth = 0;
+    RasterHeight = 0;
+
     ValidPixelCount = 0;
+
+    MinDepth = 0.0f;
+    MaxDepth = 0.0f;
+    MeanDepth = 0.0f;
+
     UE_LOG(LogTemp, Warning,
         TEXT("========== GDAL GeoTIFF Reader =========="));
 
@@ -368,13 +329,18 @@ void AGeoTIFFReaderActor::LoadGeoTIFF()
 
     ValidPixelCount = 0;
 
-    for (const float Value : RasterData)
+    // 逐一檢查 Raster 中的所有像素
+    for (int32 Index = 0; Index < RasterData.Num(); ++Index)
     {
-        if (!std::isfinite(Value))
+        const float Value = RasterData[Index];
+
+        // 排除無效數值及負水深
+        if (!std::isfinite(Value) || Value < 0.0f)
         {
             continue;
         }
 
+        // 排除 NoData
         if (bHasNoData)
         {
             if (std::isnan(NoDataValue) && std::isnan(Value))
@@ -388,6 +354,7 @@ void AGeoTIFFReaderActor::LoadGeoTIFF()
             }
         }
 
+        // 更新統計資料
         LocalMin = FMath::Min(LocalMin, Value);
         LocalMax = FMath::Max(LocalMax, Value);
 
@@ -488,6 +455,13 @@ bool AGeoTIFFReaderActor::LoadTerrainGeoTIFF()
         UE_LOG(LogTemp, Error, TEXT("[DEM] File not found."));
         return false;
     }
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[GeoTIFF TEST] Current Path: %s"),
+        *GeoTIFFPath
+    );
 
     GDALDataset* Dataset = static_cast<GDALDataset*>(
         GDALOpen(
@@ -764,6 +738,186 @@ bool AGeoTIFFReaderActor::SampleTerrainBilinear(
     return true;
 }
 
+// 清除上一個時間點的所有水面 Mesh
+void AGeoTIFFReaderActor::ClearWaterMesh()
+{
+    for (int32 i = 0; i < WaterMeshChunks.Num(); ++i)
+    {
+        UProceduralMeshComponent* Mesh = WaterMeshChunks[i].Get();
+
+        if (!IsValid(Mesh))
+        {
+            continue;
+        }
+
+        Mesh->ClearAllMeshSections();
+
+        // 第一個區塊使用固定的 WaterMesh，不銷毀
+        // 其餘區塊是動態建立的，可以直接銷毀
+        if (Mesh != WaterMesh)
+        {
+            Mesh->DestroyComponent();
+        }
+    }
+
+    WaterMeshChunks.Reset();
+
+    // 確保固定的 WaterMesh 也被清空
+    if (IsValid(WaterMesh))
+    {
+        WaterMesh->ClearAllMeshSections();
+    }
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Previous water mesh cleared.")
+    );
+}
+
+// 根據目前 Raster 生成完整水面
+void AGeoTIFFReaderActor::GenerateFullWaterMesh()
+{
+    if (!bRasterLoaded || !bTerrainLoaded || !IsValid(WaterMesh))
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[Flood Animation] Cannot generate mesh: Raster or DEM not loaded.")
+        );
+        return;
+    }
+
+    const int32 ChunkSize = 100;
+    int32 GeneratedChunkCount = 0;
+
+    for (int32 Row = 0; Row < RasterHeight; Row += ChunkSize)
+    {
+        for (int32 Col = 0; Col < RasterWidth; Col += ChunkSize)
+        {
+            const int32 RegionWidth =
+                FMath::Min(ChunkSize, RasterWidth - Col);
+
+            const int32 RegionHeight =
+                FMath::Min(ChunkSize, RasterHeight - Row);
+
+            GenerateWaterMesh(
+                Col,
+                Row,
+                RegionWidth,
+                RegionHeight
+            );
+
+            ++GeneratedChunkCount;
+        }
+    }
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Full water mesh generated. Chunks=%d"),
+        GeneratedChunkCount
+    );
+}
+
+// 載入指定時間點的 GeoTIFF，並重新生成水面
+void AGeoTIFFReaderActor::LoadAndGenerateFrame(int32 FrameIndex)
+{
+    if (FrameIndex < 0 || FrameIndex >= TotalFrameCount)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[Flood Animation] Invalid frame index: %d"),
+            FrameIndex
+        );
+        return;
+    }
+
+    if (!bTerrainLoaded)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[Flood Animation] DEM is not loaded.")
+        );
+        return;
+    }
+
+    // 清除上一個時間點的水面
+    ClearWaterMesh();
+
+    // 組合目前影格的 GeoTIFF 路徑
+    GeoTIFFPath = FPaths::Combine(
+        PredictionDirectory,
+        FString::Printf(TEXT("depth_%03d.tif"), FrameIndex)
+    );
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Loading frame %03d: %s"),
+        FrameIndex,
+        *GeoTIFFPath
+    );
+
+    // 載入目前影格
+    LoadGeoTIFF();
+
+    if (!bRasterLoaded)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[Flood Animation] Failed to load frame %03d."),
+            FrameIndex
+        );
+        return;
+    }
+
+    // 根據新 Raster 生成水面
+    GenerateFullWaterMesh();
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Frame %03d completed. ValidPixels=%d, MaxDepth=%.6f m"),
+        FrameIndex,
+        ValidPixelCount,
+        MaxDepth
+    );
+}
+
+// 切換到下一個時間點
+void AGeoTIFFReaderActor::AdvanceToNextFrame()
+{
+    const int32 NextFrameIndex = CurrentFrameIndex + 1;
+
+    // 所有影格播放完畢，停止 Timer
+    if (NextFrameIndex >= TotalFrameCount)
+    {
+        GetWorldTimerManager().ClearTimer(AnimationTimerHandle);
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[Flood Animation] Animation completed.")
+        );
+
+        return;
+    }
+
+    CurrentFrameIndex = NextFrameIndex;
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Flood Animation] Advancing to frame %03d."),
+        CurrentFrameIndex
+    );
+
+    LoadAndGenerateFrame(CurrentFrameIndex);
+}
 
 void AGeoTIFFReaderActor::GenerateWaterMesh(
     int32 StartCol,
@@ -835,8 +989,8 @@ void AGeoTIFFReaderActor::GenerateWaterMesh(
 
             const float WaterDepth = RasterData[WaterIndex];
 
-            // 排除 NoData
-            if (!std::isfinite(WaterDepth))
+            // 排除 NoData、無效數值及沒有實際淹水的像素
+            if (!std::isfinite(WaterDepth) || WaterDepth <= 0.001f)
             {
                 continue;
             }
@@ -875,6 +1029,18 @@ void AGeoTIFFReaderActor::GenerateWaterMesh(
             {
                 continue;
             }
+
+            // 使用完整 GeoTIFF 的中心作為統一座標原點
+            // 每個區塊都使用相同的座標基準，避免重疊
+
+            const double GlobalCenterX =
+                RasterWidth * 1000.0;
+
+            const double GlobalCenterY =
+                RasterHeight * 1000.0;
+
+            LocalPosition.X -= GlobalCenterX;
+            LocalPosition.Y += GlobalCenterY;
 
             // 地形高程 + 水深，單位 m 轉成 UE cm
             const double WaterSurfaceElevation =
@@ -970,9 +1136,62 @@ void AGeoTIFFReaderActor::GenerateWaterMesh(
     // 3. 建立 Procedural Mesh Section
     // ------------------------------------------------
 
-    WaterMesh->ClearAllMeshSections();
+    // ================================================
+    // Create Independent Mesh Component for Each Chunk
+    // ================================================
 
-    WaterMesh->CreateMeshSection(
+    const int32 ChunkIndex = WaterMeshChunks.Num();
+
+    UProceduralMeshComponent* ChunkMesh = nullptr;
+
+    // 第一個區塊使用原本的 Root WaterMesh
+    if (ChunkIndex == 0)
+    {
+        ChunkMesh = WaterMesh;
+    }
+    else
+    {
+        // 建立新的 Procedural Mesh Component
+        const FName ComponentName(
+            *FString::Printf(
+                TEXT("WaterMesh_Chunk_%03d"),
+                ChunkIndex
+            )
+        );
+
+        ChunkMesh = NewObject<UProceduralMeshComponent>(
+            this,
+            ComponentName
+        );
+
+        if (!ChunkMesh)
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("[Mesh] Failed to create chunk component.")
+            );
+
+            return;
+        }
+
+        // 加入 Actor
+        AddInstanceComponent(ChunkMesh);
+
+        // 附加到 Root Component
+        ChunkMesh->SetupAttachment(GetRootComponent());
+
+        // 設定無碰撞
+        ChunkMesh->SetCollisionEnabled(
+            ECollisionEnabled::NoCollision
+        );
+
+        // 註冊 Component
+        ChunkMesh->RegisterComponent();
+    }
+
+    // 建立 Mesh Section
+    ChunkMesh->CreateMeshSection(
         0,
         Vertices,
         Triangles,
@@ -981,6 +1200,38 @@ void AGeoTIFFReaderActor::GenerateWaterMesh(
         TArray<FColor>(),
         TArray<FProcMeshTangent>(),
         false
+    );
+
+    // 指派材質
+    if (WaterMaterial)
+    {
+        ChunkMesh->SetMaterial(0, WaterMaterial);
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[Mesh] Water material assigned.")
+        );
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[Mesh] WaterMaterial is not assigned.")
+        );
+    }
+
+    // 記錄區塊
+    WaterMeshChunks.Add(ChunkMesh);
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[Mesh] Chunk %d created. Vertices=%d Triangles=%d"),
+        ChunkIndex,
+        Vertices.Num(),
+        Triangles.Num()
     );
 
     UE_LOG(

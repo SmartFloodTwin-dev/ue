@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ProceduralMeshComponent.h"
+#include "TimerManager.h"
 #include "GeoTIFFReaderActor.generated.h"
 
 UCLASS()
@@ -15,7 +16,28 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Flood Mesh")
     TObjectPtr<UProceduralMeshComponent> WaterMesh;
 
+    // 儲存完整淹水區域的所有 Mesh 區塊
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Flood Mesh")
+    TArray<TObjectPtr<UProceduralMeshComponent>> WaterMeshChunks;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flood Mesh")
+    UMaterialInterface* WaterMaterial;
+
 protected:
+
+    virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+    // Flood Animation
+    void LoadAndGenerateFrame(int32 FrameIndex);
+    void ClearWaterMesh();
+    void GenerateFullWaterMesh();
+    void AdvanceToNextFrame();
+
+    FTimerHandle AnimationTimerHandle;
+    int32 CurrentFrameIndex = 0;
+
+    // Water Mesh
     void GenerateWaterMesh(
         int32 StartCol,
         int32 StartRow,
@@ -23,7 +45,6 @@ protected:
         int32 RegionHeight
     );
 
-    // 將 Raster 像素座標轉換成 UE 區域座標
     bool RasterPixelToLocalUE(
         int32 Col,
         int32 Row,
@@ -31,49 +52,29 @@ protected:
     ) const;
 
     void GenerateWaterMeshTest();
-    
-    virtual void BeginPlay() override;
 
-    // 讀取 GeoTIFF
+    // GeoTIFF
     void LoadGeoTIFF();
-
-    // 載入 DEM GeoTIFF
     bool LoadTerrainGeoTIFF();
 
-    // 根據實際地理座標取得 DEM 高程（雙線性內插）
     bool SampleTerrainBilinear(
         double WorldX,
         double WorldY,
         float& OutElevation
     ) const;
 
-    // 保存完整 Raster 水深資料
     TArray<float> RasterData;
-
-    // GeoTIFF 地理座標轉換參數
-    // [0] 左上角 X
-    // [1] 像素寬度
-    // [2] X 方向旋轉
-    // [3] 左上角 Y
-    // [4] Y 方向旋轉
-    // [5] 像素高度
     double GeoTransform[6] = {};
 
-    // DEM 高程資料
     TArray<float> TerrainData;
-
-    // DEM 地理座標轉換資訊
     double TerrainGeoTransform[6] = {};
 
-    // DEM Raster 尺寸
     int32 TerrainWidth = 0;
     int32 TerrainHeight = 0;
 
-    // DEM NoData
     double TerrainNoDataValue = 0.0;
     bool bTerrainHasNoData = false;
 
-    // DEM 載入狀態
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GeoTIFF")
     bool bTerrainLoaded = false;
 
@@ -109,4 +110,25 @@ public:
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "GDAL")
     bool bRasterLoaded = false;
+
+        // ================================
+        // Flood Animation Settings
+        // ================================
+
+        // PINN 預測結果資料夾
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flood Animation")
+        FString PredictionDirectory =
+            TEXT("C:/Users/jeff2/Desktop/PINN/outputs/minxiong/prediction");
+
+        // 總時間點數量
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flood Animation")
+        int32 TotalFrameCount = 21;
+
+        // 每個時間點停留秒數
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flood Animation")
+        float FrameIntervalSeconds = 1.0f;
+
+        // 是否在遊戲開始時自動播放
+        UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Flood Animation")
+        bool bAutoPlay = true;
 };
